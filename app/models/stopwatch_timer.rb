@@ -8,7 +8,19 @@ class StopwatchTimer < ApplicationRecord
 
   STATES = %w[stopped running paused].freeze
 
+  # LOCAL CHANGE: segments shorter than this are discarded instead of being
+  # written to Redmine (protects against accidental taps / instant switches).
+  MIN_SEGMENT_SECONDS = 60
+
   validates :state, inclusion: { in: STATES }
+
+  # Outcome of the most recent stop!/snap! call, exposed to the controller so
+  # the UI can tell the user what happened. Hash or nil:
+  #   { status: 'logged',    issue_id:, hours:, entry_id: }
+  #   { status: 'discarded', issue_id:, seconds: }
+  #   { status: 'kept',      issue_id:, reason: }   (auto-logging failed; the
+  #                                                   segment stays in the list)
+  attr_reader :last_result
 
   # Total elapsed seconds, including live time if currently running
   def elapsed_seconds
@@ -37,9 +49,10 @@ class StopwatchTimer < ApplicationRecord
   # --- State transitions ---
 
   def start!(issue_id: nil, project_id: nil)
+    @last_result             = nil
     self.state               = 'running'
     self.started_at          = Time.now.utc
-    self.started_on          = Time.now.utc.to_date
+    self.started_on          = local_today
     self.accumulated_seconds = 0
     self.issue_id            = issue_id
     self.project_id          = project_id
@@ -65,26 +78,32 @@ class StopwatchTimer < ApplicationRecord
     save!
   end
 
-  # Saves current segment, stops timer, returns the created segment (or nil)
+  # Saves the current segment, stops the timer and immediately turns the
+  # segment into a Redmine time entry. Returns the segment (or nil).
   def stop!
+    @last_result = nil
     segment = build_and_save_segment
     reset!
+    auto_log_segment(segment)
     segment
   end
 
-  # Saves current segment, resets counter to 0, continues running with new context
+  # Saves the current segment, immediately turns it into a time entry and
+  # continues running on the new issue with a fresh counter.
   # Note: if called while paused, also resumes the timer (design decision).
   def snap!(new_issue_id: nil, new_project_id: nil)
+    @last_result = nil
     segment = build_and_save_segment
     self.accumulated_seconds = 0
     self.started_at          = Time.now.utc
-    self.started_on          = Time.now.utc.to_date
+    self.started_on          = local_today
     self.state               = 'running'
     self.issue_id            = new_issue_id
     self.project_id          = new_project_id
     self.comments            = nil
     self.activity_id         = nil
     save!
+    auto_log_segment(segment)
     segment
   end
 
@@ -113,9 +132,19 @@ class StopwatchTimer < ApplicationRecord
 
   private
 
+  # The user's own "today" (respects the time zone set in My account) so that
+  # entries made shortly after local midnight are not booked to yesterday.
+  def local_today
+    (user || User.find_by(id: user_id))&.today || Time.now.utc.to_date
+  end
+
   def build_and_save_segment(seconds_override = nil)
     secs = seconds_override || elapsed_seconds
-    return nil if secs < 1
+
+    if secs < MIN_SEGMENT_SECONDS
+      @last_result = { status: 'discarded', issue_id: issue_id, seconds: secs } if issue_id.present?
+      return nil
+    end
 
     StopwatchSegment.create!(
       user_id:     user_id,
@@ -123,9 +152,39 @@ class StopwatchTimer < ApplicationRecord
       issue_id:    issue_id,
       activity_id: activity_id,
       seconds:     secs,
-      spent_on:    started_on || Time.now.utc.to_date,
+      spent_on:    started_on || local_today,
       comments:    comments.presence
     )
+  end
+
+  # Turns a freshly saved segment into a Redmine TimeEntry (default activity,
+  # comment = issue subject). If anything goes wrong the segment simply stays
+  # in the segments list, so no tracked time is ever lost.
+  def auto_log_segment(segment)
+    return unless segment&.persisted?
+
+    unless segment.project_id.present?
+      @last_result = { status: 'kept', issue_id: segment.issue_id, reason: 'no_project' }
+      return
+    end
+
+    activity_id = segment.activity_id.presence ||
+                  TimeEntryActivity.default_activity_id(segment.user, segment.project) ||
+                  TimeEntryActivity.available_activities(segment.project).first&.id
+    if activity_id.blank?
+      @last_result = { status: 'kept', issue_id: segment.issue_id, reason: 'no_activity' }
+      return
+    end
+
+    comments = segment.comments.presence ||
+               segment.issue&.subject.presence ||
+               segment.project&.name.to_s
+
+    entry = segment.save_as_time_entry!(activity_id: activity_id, comments: comments)
+    @last_result = { status: 'logged', issue_id: entry.issue_id, hours: entry.hours.to_f, entry_id: entry.id }
+  rescue ActiveRecord::ActiveRecordError => e
+    Rails.logger.warn("[stopwatch] auto-log failed, segment kept: #{e.message}")
+    @last_result = { status: 'kept', issue_id: segment&.issue_id, reason: 'error' }
   end
 
   def reset!

@@ -1,53 +1,53 @@
-/* Redmine Stopwatch Plugin — Client-side timer widget */
+/* Redmine Stopwatch Plugin — client-side timer widget
+ *
+ * LOCAL REDESIGN: a large floating bar with three controls —
+ *   ▶ start (on the issue that is open), ⏹ stop, ☰ recent issues.
+ * The timer always belongs to an issue. The ☰ panel lists the last tracked
+ * issues; choosing one switches the timer (previous segment is written to
+ * Redmine immediately, then a new segment starts).
+ */
 (function ($) {
   'use strict';
 
   // ── State ────────────────────────────────────────────────────────────────
-  var widget          = null;
-  var timerState      = 'stopped';   // 'stopped' | 'running' | 'paused'
-  var accSeconds      = 0;           // accumulated_seconds from server
-  var startedAtMs     = null;        // Date.now() equivalent of started_at
-  var tickInterval    = null;
-  var tickTimeout     = null;        // used to align first tick to minute boundary
-  var busy            = false;       // prevents concurrent API calls
-  var pendingCount    = 0;           // unsaved segments count
+  var widget       = null;   // #stopwatch-widget (fixed container)
+  var bar          = null;   // .sw-bar   (buttons)
+  var popup        = null;   // .sw-popup (recent issues)
+  var toast        = null;   // .sw-toast (feedback)
+  var i18n         = {};
+  var timerState   = 'stopped';   // 'stopped' | 'running' | 'paused' (legacy)
+  var accSeconds   = 0;
+  var startedAtMs  = null;
+  var tickInterval = null;
+  var tickTimeout  = null;
+  var busy         = false;
+  var pendingCount = 0;          // segments that could not be auto-logged
+  var timerIssue   = null;       // { id, subject, url } the timer runs on
+  var pageIssue    = null;       // { id, subject, url, canTrack } open page
+  var popupOpen    = false;
+  var toastTimer   = null;
+  var swChannel    = null;
 
-  // Timer context (the issue/project the timer was started on)
-  var timerContextLabel = '';
-  var timerContextUrl   = '';
-  var timerIssueId      = '';
-  var timerProjectId    = '';
-
-  // Page context (current page — static for this page load)
-  var pageContextLabel  = '';
-  var pageContextUrl    = '';
-  var pageIssueId       = '';
-  var pageProjectId     = '';
-
-  // ── Cross-tab sync ────────────────────────────────────────────────────────
-
-  var swChannel = null;
-
-  function broadcastState(data) {
-    if (!swChannel) { return; }
-    swChannel.postMessage({
-      state:                  data.state,
-      accumulated_seconds:    data.accumulated_seconds,
-      started_at:             data.started_at,
-      pending_segments_count: data.pending_segments_count,
-      timerContextLabel:      timerContextLabel,
-      timerContextUrl:        timerContextUrl,
-      timerIssueId:           timerIssueId,
-      timerProjectId:         timerProjectId
-    });
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  // ── Helpers ──────────────────────────────────────────────────────────────
 
   function csrfToken() {
     var meta = document.querySelector('meta[name="csrf-token"]');
     return meta ? meta.getAttribute('content') : '';
   }
+
+  function esc(str) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str == null ? '' : String(str)));
+    return div.innerHTML.replace(/"/g, '&quot;');
+  }
+
+  function fmt(template, vars) {
+    return String(template || '').replace(/\{(\w+)\}/g, function (m, key) {
+      return Object.prototype.hasOwnProperty.call(vars || {}, key) ? vars[key] : m;
+    });
+  }
+
+  function t(key) { return i18n[key] || ''; }
 
   function formatTime(totalSeconds) {
     var totalMinutes = Math.floor(totalSeconds / 60);
@@ -63,306 +63,324 @@
     return accSeconds;
   }
 
-  // Safely escape a string for use in HTML attribute/text content
-  function escHtml(str) {
-    var div = document.createElement('div');
-    div.appendChild(document.createTextNode(str || ''));
-    return div.innerHTML;
+  function isTracking() { return timerState === 'running' || timerState === 'paused'; }
+
+  function readIssue(prefix) {
+    var id = widget.dataset[prefix + 'IssueId'];
+    if (!id) { return null; }
+    return {
+      id:       String(id),
+      subject:  widget.dataset[prefix + 'IssueSubject'] || '',
+      url:      widget.dataset[prefix + 'IssueUrl'] || '',
+      canTrack: widget.dataset[prefix + 'CanTrack'] === '1'
+    };
   }
 
-  // Reserved path segments — populated from server data-reserved-paths in $(document).ready().
-  // Initialised to an empty pattern so detectContext() is safe before DOM ready.
-  var RESERVED_PROJECT_PATHS = /^$/;
-
-  // Detect issue_id / project_id from current URL (used as API params)
-  function detectContext() {
-    var path = window.location.pathname;
-    var issueMatch   = path.match(/\/issues\/(\d+)/);
-    var projectMatch = path.match(/\/projects\/([^/]+)/);
-
-    if (issueMatch) { return { issue_id: issueMatch[1] }; }
-    if (projectMatch && !RESERVED_PROJECT_PATHS.test(projectMatch[1])) {
-      return { project_id: projectMatch[1] };
-    }
-    return {};
+  function issueFromJson(issue) {
+    return issue ? { id: String(issue.id), subject: issue.subject || '', url: issue.url || '' } : null;
   }
 
-  // True if the timer context and current page context are the same
-  function isSameContext() {
-    // Both have an issue — compare issues
-    if (timerIssueId && pageIssueId) {
-      return timerIssueId === pageIssueId;
-    }
-    // Both have only a project (no issue) — compare projects
-    if (!timerIssueId && timerProjectId && !pageIssueId && pageProjectId) {
-      return timerProjectId === pageProjectId;
-    }
-    // Both have no context
-    if (!timerIssueId && !timerProjectId && !pageIssueId && !pageProjectId) {
-      return true;
-    }
-    return false;
+  function isOnSegmentsPage() {
+    var segUrl = widget && widget.dataset.segmentsUrl;
+    if (!segUrl) { return false; }
+    return window.location.pathname === segUrl.split('?')[0].split('#')[0];
   }
 
-  // ── API calls ─────────────────────────────────────────────────────────────
+  // ── Feedback toast ───────────────────────────────────────────────────────
 
-  function setButtonsDisabled(disabled) {
+  function showToast(html, kind, ms) {
+    if (!toast) { return; }
+    toast.className = 'sw-toast sw-toast-' + (kind || 'ok');
+    toast.innerHTML = html;
+    toast.hidden = false;
+    if (toastTimer) { clearTimeout(toastTimer); }
+    toastTimer = setTimeout(function () { toast.hidden = true; }, ms || 5000);
+  }
+
+  function showResult(result) {
+    if (!result) { return; }
+    if (result.status === 'logged') {
+      showToast(esc(fmt(t('notice_stopwatch_logged'),
+        { hours: Number(result.hours).toFixed(2), id: result.issue_id })), 'ok');
+    } else if (result.status === 'discarded') {
+      showToast(esc(fmt(t('notice_stopwatch_discarded'), { id: result.issue_id })), 'warn');
+    } else if (result.status === 'kept') {
+      showToast(esc(fmt(t('notice_stopwatch_kept'), { id: result.issue_id })) +
+        ' <a href="' + esc(widget.dataset.segmentsUrl) + '">' +
+        esc(fmt(t('label_stopwatch_unsaved_segments'), { n: pendingCount })) + '</a>',
+        'error', 12000);
+    }
+  }
+
+  // ── API ──────────────────────────────────────────────────────────────────
+
+  function setBusy(on) {
+    busy = on;
     if (!widget) { return; }
-    var buttons = widget.querySelectorAll('button.sw-btn');
-    for (var i = 0; i < buttons.length; i++) {
-      buttons[i].disabled = disabled;
-    }
+    widget.classList.toggle('sw-busy', on);
+    var buttons = widget.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) { buttons[i].disabled = on; }
   }
 
-  function apiCall(url, method, extraParams, callback) {
+  function apiCall(url, params, callback) {
     if (busy) { return; }
-    busy = true;
-    setButtonsDisabled(true);
-
-    var params = $.extend({}, detectContext(), extraParams || {});
+    setBusy(true);
     $.ajax({
       url:      url,
-      type:     method,
-      data:     params,
+      type:     'POST',
+      data:     params || {},
       dataType: 'json',
       headers:  { 'X-CSRF-Token': csrfToken() },
       success: function (data) {
-        busy = false;
-        if (callback) { callback(data); }
+        setBusy(false);
+        callback(data);
         broadcastState(data);
       },
       error: function (xhr) {
-        busy = false;
-        setButtonsDisabled(false);
+        setBusy(false);
+        var msg = (xhr.responseJSON && xhr.responseJSON.error) || t('error_stopwatch_generic');
+        showToast(esc(msg), 'error', 7000);
         console.error('[Stopwatch] API error', xhr.status, xhr.responseText);
       }
     });
   }
 
-  // ── State update ──────────────────────────────────────────────────────────
-
-  function isOnSegmentsPage() {
-    var segUrl = widget && widget.dataset.segmentsUrl;
-    if (!segUrl) { return false; }
-    var segPath = segUrl.split('?')[0].split('#')[0];
-    return window.location.pathname === segPath;
+  function startOn(issueId) {
+    closePopup();
+    apiCall(widget.dataset.startUrl, { issue_id: issueId }, function (data) { applyState(data); });
   }
 
-  function applyState(data) {
-    if (isOnSegmentsPage()) {
-      window.location.reload();
-      return;
-    }
-    timerState = data.state || 'stopped';
-    accSeconds = data.accumulated_seconds || 0;
+  function stopTimer() {
+    closePopup();
+    apiCall(widget.dataset.stopUrl, {}, function (data) { applyState(data); });
+  }
 
-    if (data.started_at) {
-      startedAtMs = new Date(data.started_at).getTime();
-    } else {
-      startedAtMs = null;
-    }
+  // ── Cross-tab sync ───────────────────────────────────────────────────────
 
+  function broadcastState(data) {
+    if (!swChannel) { return; }
+    swChannel.postMessage({
+      state:                  data.state,
+      accumulated_seconds:    data.accumulated_seconds,
+      started_at:             data.started_at,
+      pending_segments_count: data.pending_segments_count,
+      issue:                  data.issue
+    });
+  }
+
+  // ── State ────────────────────────────────────────────────────────────────
+
+  function applyState(data, silent) {
+    timerState  = data.state || 'stopped';
+    accSeconds  = data.accumulated_seconds || 0;
+    startedAtMs = data.started_at ? new Date(data.started_at).getTime() : null;
     if (typeof data.pending_segments_count !== 'undefined') {
       pendingCount = data.pending_segments_count;
     }
+    timerIssue = issueFromJson(data.issue);
 
-    renderWidget();
+    if (!silent) { showResult(data.result); }
+
+    // The segments page renders lists on the server: refresh it after a change.
+    if (!silent && isOnSegmentsPage()) {
+      setTimeout(function () { window.location.reload(); }, data.result ? 1500 : 0);
+      return;
+    }
+    renderBar();
     resetTick();
   }
-
-  // After start/snap the timer context becomes the current page context
-  function applyStateAfterStart(data) {
-    timerContextLabel = pageContextLabel;
-    timerContextUrl   = pageContextUrl;
-    timerIssueId      = pageIssueId;
-    timerProjectId    = pageProjectId;
-    applyState(data);
-  }
-
-  // After stop, clear timer context
-  function applyStateAfterStop(data) {
-    timerContextLabel = '';
-    timerContextUrl   = '';
-    timerIssueId      = '';
-    timerProjectId    = '';
-    applyState(data);
-  }
-
-  // ── Tick ──────────────────────────────────────────────────────────────────
 
   function resetTick() {
     if (tickTimeout)  { clearTimeout(tickTimeout);   tickTimeout  = null; }
     if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
     if (timerState !== 'running') { return; }
 
-    // Align the first tick to the next whole-minute boundary
     var msUntilNextMinute = 60000 - (Date.now() % 60000);
     tickTimeout = setTimeout(function () {
       tickTimeout  = null;
-      renderWidget();
-      tickInterval = setInterval(function () { renderWidget(); }, 60000);
+      renderBar();
+      tickInterval = setInterval(renderBar, 60000);
     }, msUntilNextMinute);
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Bar rendering ────────────────────────────────────────────────────────
 
-  function renderSegmentsLink(segUrl) {
-    var s = '<a class="sw-btn sw-list" href="' + segUrl + '" title="Segments">\u2630';
+  function startButton(issue, title) {
+    return '<button type="button" class="sw-btn sw-start" data-issue-id="' + esc(issue.id) + '"' +
+           ' title="' + esc(title) + '" aria-label="' + esc(title) + '">' +
+           '<span class="sw-ico">▶</span><span class="sw-lbl">#' + esc(issue.id) + '</span></button>';
+  }
+
+  function renderBar() {
+    if (!bar) { return; }
+    var tracking = isTracking();
+    var html = '';
+    widget.classList.toggle('sw-tracking', tracking);
+
+    if (tracking && timerIssue) {
+      html += '<a class="sw-ctx" href="' + esc(timerIssue.url) + '" title="' + esc(timerIssue.subject) + '">' +
+              '<span class="sw-ctx-id">#' + esc(timerIssue.id) + '</span>' +
+              '<span class="sw-ctx-subject">' + esc(timerIssue.subject) + '</span></a>';
+    }
+    if (tracking) {
+      html += '<span class="sw-time' + (timerState === 'paused' ? ' sw-paused' : '') + '">' +
+              formatTime(computeElapsed()) + '</span>';
+    }
+
+    // Legacy paused timer (pause is no longer offered): allow resuming it
+    if (timerState === 'paused' && timerIssue) {
+      html += startButton(timerIssue, t('button_stopwatch_start'));
+    }
+
+    // Start (or switch) on the issue that is open right now
+    if (pageIssue && pageIssue.canTrack && !(tracking && timerIssue && timerIssue.id === pageIssue.id)) {
+      html += startButton(pageIssue, tracking ? t('button_stopwatch_start_here') : t('button_stopwatch_start'));
+    }
+
+    if (tracking) {
+      html += '<button type="button" class="sw-btn sw-stop" title="' + esc(t('button_stopwatch_stop')) +
+              '" aria-label="' + esc(t('button_stopwatch_stop')) + '"><span class="sw-ico">⏹</span></button>';
+    }
+
+    html += '<button type="button" class="sw-btn sw-list' + (popupOpen ? ' sw-list-open' : '') +
+            '" title="' + esc(t('button_stopwatch_recent')) + '" aria-label="' + esc(t('button_stopwatch_recent')) +
+            '" aria-expanded="' + (popupOpen ? 'true' : 'false') + '"><span class="sw-ico">☰</span>';
+    if (pendingCount > 0) { html += '<span class="sw-badge">' + pendingCount + '</span>'; }
+    html += '</button>';
+
+    bar.innerHTML = html;
+    bindBar();
+  }
+
+  function bindBar() {
+    var startBtns = bar.querySelectorAll('.sw-start');
+    for (var i = 0; i < startBtns.length; i++) {
+      startBtns[i].addEventListener('click', function (e) {
+        startOn(e.currentTarget.getAttribute('data-issue-id'));
+      });
+    }
+    var stopBtn = bar.querySelector('.sw-stop');
+    if (stopBtn) { stopBtn.addEventListener('click', stopTimer); }
+    var listBtn = bar.querySelector('.sw-list');
+    if (listBtn) { listBtn.addEventListener('click', togglePopup); }
+  }
+
+  // ── Recent issues popup ──────────────────────────────────────────────────
+
+  function togglePopup() { if (popupOpen) { closePopup(); } else { openPopup(); } }
+
+  function openPopup() {
+    popupOpen = true;
+    popup.hidden = false;
+    popup.innerHTML = '<div class="sw-popup-title">' + esc(t('label_stopwatch_recent_title')) + '</div>' +
+                      '<div class="sw-popup-body sw-muted">' + esc(t('label_stopwatch_recent_loading')) + '</div>';
+    renderBar();
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', onOutside, true);
+    document.addEventListener('touchstart', onOutside, true);
+
+    $.getJSON(widget.dataset.recentUrl)
+      .done(function (data) { if (popupOpen) { renderRecent(data); } })
+      .fail(function () {
+        if (popupOpen) { popup.querySelector('.sw-popup-body').textContent = t('error_stopwatch_generic'); }
+      });
+  }
+
+  function closePopup() {
+    if (!popupOpen) { return; }
+    popupOpen = false;
+    popup.hidden = true;
+    document.removeEventListener('keydown', onKeyDown);
+    document.removeEventListener('mousedown', onOutside, true);
+    document.removeEventListener('touchstart', onOutside, true);
+    renderBar();
+  }
+
+  function onKeyDown(e) { if (e.key === 'Escape') { closePopup(); } }
+  function onOutside(e) { if (widget && !widget.contains(e.target)) { closePopup(); } }
+
+  function formatLast(iso) {
+    if (!iso) { return ''; }
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) { return ''; }
+    var now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    return d.toLocaleDateString([], { day: 'numeric', month: 'short' });
+  }
+
+  function renderRecent(data) {
+    var issues = (data && data.issues) || [];
+    var html = '<div class="sw-popup-title">' + esc(t('label_stopwatch_recent_title')) + '</div>';
+
+    if (!issues.length) {
+      html += '<div class="sw-popup-body sw-muted">' + esc(t('label_stopwatch_recent_empty')) + '</div>';
+    } else {
+      html += '<div class="sw-popup-body">';
+      issues.forEach(function (issue) {
+        var meta = [issue.project];
+        if (issue.active) {
+          meta.push(t('label_stopwatch_recent_active'));
+        } else {
+          if (issue.today_hours > 0) { meta.push(fmt(t('label_stopwatch_recent_today'), { h: issue.today_hours })); }
+          var last = formatLast(issue.last_at);
+          if (last) { meta.push(last); }
+        }
+        html += '<button type="button" class="sw-row' + (issue.active ? ' sw-row-active' : '') + '"' +
+                ' data-issue-id="' + esc(issue.id) + '"' + (issue.active && timerState === 'running' ? ' disabled' : '') + '>' +
+                '<span class="sw-row-main"><span class="sw-row-id">#' + esc(issue.id) + '</span> ' +
+                '<span class="sw-row-subject">' + esc(issue.subject) + '</span></span>' +
+                '<span class="sw-row-meta">' + (issue.active ? '● ' : '') + esc(meta.join(' · ')) + '</span>' +
+                '</button>';
+      });
+      html += '</div>';
+    }
+
     if (pendingCount > 0) {
-      s += '<span class="sw-badge">' + pendingCount + '</span>';
+      html += '<a class="sw-popup-footer" href="' + esc(widget.dataset.segmentsUrl) + '">' +
+              esc(fmt(t('label_stopwatch_unsaved_segments'), { n: pendingCount })) + '</a>';
     }
-    s += '</a>';
-    return s;
-  }
+    popup.innerHTML = html;
 
-  function renderContextLink(label, url, extraClass) {
-    var cls = 'sw-ctx' + (extraClass ? ' ' + extraClass : '');
-    return '<a class="' + cls + '" href="' + escHtml(url) + '">' + escHtml(label) + '</a>';
-  }
-
-  function renderWidget() {
-    if (!widget) { return; }
-
-    var segUrl  = widget.dataset.segmentsUrl;
-    var elapsed = formatTime(computeElapsed());
-    var sameCtx = isSameContext();
-    var html    = '';
-
-    if (timerState === 'stopped') {
-      // [pageCtxLink ▶ | ☰ badge]
-      if (pageContextLabel) {
-        html += renderContextLink(pageContextLabel, pageContextUrl);
-      }
-      html += '<button class="sw-btn sw-start" title="Start">\u25B6</button>';
-      html += '<span class="sw-vsep"></span>';
-      html += renderSegmentsLink(segUrl);
-
-    } else if (timerState === 'running') {
-      // [timerCtxLink - H:MM | ⏸ ⏹ [| pageCtxLink] ⏭ | ☰ badge]
-      if (timerContextLabel) {
-        html += renderContextLink(timerContextLabel, timerContextUrl);
-        html += '<span class="sw-sep">-</span>';
-      }
-      html += '<span class="sw-time">' + elapsed + '</span>';
-      html += '<span class="sw-vsep"></span>';
-      html += '<button class="sw-btn sw-pause" title="Pause">\u23F8</button>';
-      html += '<button class="sw-btn sw-stop"  title="Stop">\u23F9</button>';
-      if (!sameCtx && pageContextLabel) {
-        html += '<span class="sw-vsep"></span>';
-        html += renderContextLink(pageContextLabel, pageContextUrl, 'sw-ctx-page');
-      }
-      html += '<button class="sw-btn sw-snap"  title="Next segment">\u23ED</button>';
-      html += '<span class="sw-vsep"></span>';
-      html += renderSegmentsLink(segUrl);
-
-    } else if (timerState === 'paused') {
-      // [timerCtxLink - H:MM | ⏯ ⏹ [| pageCtxLink] ⏭ | ☰ badge]
-      if (timerContextLabel) {
-        html += renderContextLink(timerContextLabel, timerContextUrl);
-        html += '<span class="sw-sep">-</span>';
-      }
-      html += '<span class="sw-time sw-paused">' + elapsed + '</span>';
-      html += '<span class="sw-vsep"></span>';
-      html += '<button class="sw-btn sw-resume" title="Resume">\u23EF</button>';
-      html += '<button class="sw-btn sw-stop"   title="Stop">\u23F9</button>';
-      if (!sameCtx && pageContextLabel) {
-        html += '<span class="sw-vsep"></span>';
-        html += renderContextLink(pageContextLabel, pageContextUrl, 'sw-ctx-page');
-      }
-      html += '<button class="sw-btn sw-snap"   title="Next segment">\u23ED</button>';
-      html += '<span class="sw-vsep"></span>';
-      html += renderSegmentsLink(segUrl);
+    var rows = popup.querySelectorAll('.sw-row');
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].addEventListener('click', function (e) {
+        startOn(e.currentTarget.getAttribute('data-issue-id'));
+      });
     }
-
-    widget.innerHTML = html;
-    bindButtons();
   }
 
-  // ── Event binding ─────────────────────────────────────────────────────────
-
-  function bindButtons() {
-    var startUrl  = widget.dataset.startUrl;
-    var pauseUrl  = widget.dataset.pauseUrl;
-    var resumeUrl = widget.dataset.resumeUrl;
-    var snapUrl   = widget.dataset.snapUrl;
-    var stopUrl   = widget.dataset.stopUrl;
-
-    var startBtn  = widget.querySelector('.sw-start');
-    var pauseBtn  = widget.querySelector('.sw-pause');
-    var resumeBtn = widget.querySelector('.sw-resume');
-    var stopBtn   = widget.querySelector('.sw-stop');
-    var snapBtn   = widget.querySelector('.sw-snap');
-
-    if (startBtn)  { startBtn.addEventListener('click',  function () { apiCall(startUrl,  'POST', {}, applyStateAfterStart); }); }
-    if (pauseBtn)  { pauseBtn.addEventListener('click',  function () { apiCall(pauseUrl,  'POST', {}, applyState); }); }
-    if (resumeBtn) { resumeBtn.addEventListener('click', function () { apiCall(resumeUrl, 'POST', {}, applyState); }); }
-    if (snapBtn)   { snapBtn.addEventListener('click',   function () { apiCall(snapUrl,   'POST', {}, applyStateAfterStart); }); }
-    if (stopBtn)   { stopBtn.addEventListener('click',   function () { apiCall(stopUrl,   'POST', {}, applyStateAfterStop); }); }
-  }
-
-  // ── Init ──────────────────────────────────────────────────────────────────
+  // ── Init ─────────────────────────────────────────────────────────────────
 
   $(document).ready(function () {
     widget = document.getElementById('stopwatch-widget');
     if (!widget) { return; }
 
-    // Build reserved-paths regex from server data (single source of truth in Ruby)
-    var reservedPathsAttr = widget.dataset.reservedPaths || '';
-    if (reservedPathsAttr) {
-      var paths = reservedPathsAttr.split(',').filter(Boolean);
-      RESERVED_PROJECT_PATHS = new RegExp('^(' + paths.join('|') + ')$');
-    }
+    try { i18n = JSON.parse(widget.dataset.i18n || '{}'); } catch (e) { i18n = {}; }
 
-    // Read initial state rendered by server into data-* attributes
-    timerState = widget.dataset.state || 'stopped';
-    accSeconds = parseInt(widget.dataset.accumulatedSeconds, 10) || 0;
+    timerState   = widget.dataset.state || 'stopped';
+    accSeconds   = parseInt(widget.dataset.accumulatedSeconds, 10) || 0;
     pendingCount = parseInt(widget.dataset.pendingCount, 10) || 0;
+    startedAtMs  = widget.dataset.startedAt ? new Date(widget.dataset.startedAt).getTime() : null;
+    timerIssue   = readIssue('timer');
+    pageIssue    = readIssue('page');
 
-    var startedAtStr = widget.dataset.startedAt;
-    startedAtMs = startedAtStr ? new Date(startedAtStr).getTime() : null;
-
-    // Timer context (from server)
-    timerContextLabel = widget.dataset.timerContextLabel || '';
-    timerContextUrl   = widget.dataset.timerContextUrl   || '';
-    timerIssueId      = widget.dataset.timerIssueId      || '';
-    timerProjectId    = widget.dataset.timerProjectId    || '';
-
-    // Page context (from server — static for this page load)
-    pageContextLabel  = widget.dataset.pageContextLabel  || '';
-    pageContextUrl    = widget.dataset.pageContextUrl    || '';
-    pageIssueId       = widget.dataset.pageIssueId       || '';
-    pageProjectId     = widget.dataset.pageProjectId     || '';
-
-    // Move widget into #top-menu (it was injected before #wrapper by the hook).
-    // On mobile Redmine hides #top-menu; fall back to .flyout-menu if present.
-    var topMenu = document.getElementById('top-menu');
-    if (topMenu && window.getComputedStyle(topMenu).display !== 'none') {
-      topMenu.appendChild(widget);
-    } else {
-      var flyout = document.querySelector('.flyout-menu ul') ||
-                   document.querySelector('.flyout-menu');
-      if (flyout) {
-        var li = document.createElement('li');
-        li.id = 'stopwatch-widget-mobile';
-        li.appendChild(widget);
-        flyout.appendChild(li);
-      }
-      // If neither container exists, leave widget in place (before #wrapper).
-    }
+    // Floating bar attached to <body> (never inside the small #top-menu)
+    document.body.appendChild(widget);
+    widget.innerHTML = '<div class="sw-popup" hidden></div>' +
+                       '<div class="sw-toast" role="status" hidden></div>' +
+                       '<div class="sw-bar"></div>';
+    popup = widget.querySelector('.sw-popup');
+    toast = widget.querySelector('.sw-toast');
+    bar   = widget.querySelector('.sw-bar');
 
     try { swChannel = new BroadcastChannel('stopwatch-' + (widget.dataset.userId || '0')); } catch (e) { /* unsupported */ }
     if (swChannel) {
-      swChannel.onmessage = function (e) {
-        var msg = e.data;
-        timerContextLabel = msg.timerContextLabel || '';
-        timerContextUrl   = msg.timerContextUrl   || '';
-        timerIssueId      = msg.timerIssueId      || '';
-        timerProjectId    = msg.timerProjectId    || '';
-        applyState(msg);
-      };
+      swChannel.onmessage = function (e) { applyState(e.data, true); };
     }
 
-    renderWidget();
+    renderBar();
     resetTick();
   });
 

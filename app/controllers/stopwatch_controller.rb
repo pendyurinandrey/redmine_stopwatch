@@ -4,6 +4,7 @@ class StopwatchController < ApplicationController
   before_action :require_login
   before_action :authorize_global
   before_action :find_timer,   only: %i[state start pause resume snap stop]
+  before_action :find_target_issue, only: %i[start snap]
   before_action :find_segment, only: %i[save_segment delete_segment update_segment]
 
   # GET /stopwatch/state.json
@@ -11,11 +12,12 @@ class StopwatchController < ApplicationController
     render json: timer_json
   end
 
-  # POST /stopwatch/start.json
+  # POST /stopwatch/start.json  (params: issue_id — required)
+  # LOCAL CHANGE: the timer always belongs to an issue. If it is stopped it
+  # starts on that issue; if it already runs on another issue the current
+  # segment is saved as a time entry and a new one starts (switch).
   def start
-    resolve_context
-    @timer.start!(issue_id: @context_issue_id, project_id: @context_project_id)
-    render json: timer_json
+    activate_issue
   end
 
   # POST /stopwatch/pause.json
@@ -30,17 +32,62 @@ class StopwatchController < ApplicationController
     render json: timer_json
   end
 
-  # POST /stopwatch/snap.json
+  # POST /stopwatch/snap.json — kept for compatibility, same as start
   def snap
-    resolve_context
-    @timer.snap!(new_issue_id: @context_issue_id, new_project_id: @context_project_id)
-    render json: timer_json
+    activate_issue
   end
 
   # POST /stopwatch/stop.json
   def stop
     @timer.stop!
     render json: timer_json
+  end
+
+  # GET /stopwatch/recent.json
+  # The user's most recently tracked open issues (from time entries), newest first.
+  def recent
+    user   = User.current
+    timer  = StopwatchTimer.find_by(user_id: user.id)
+    active = timer && timer.state != 'stopped' ? timer.issue_id : nil
+
+    rows = TimeEntry
+      .where(user_id: user.id)
+      .where.not(issue_id: nil)
+      .group(:issue_id)
+      .order(Arel.sql('MAX(time_entries.created_on) DESC'))
+      .limit(RECENT_SCAN_LIMIT)
+      .pluck(:issue_id, Arel.sql('MAX(time_entries.created_on)'))
+    last_at = rows.each_with_object({}) { |(id, ts), h| h[id] = parse_ts(ts) }
+
+    ids = last_at.keys
+    ids |= [active] if active
+    issues = Issue.visible(user).open
+                  .where(id: ids)
+                  .includes(:project, :tracker, :status)
+                  .to_a
+                  .select { |i| user.allowed_to?(:log_time, i.project) }
+    issues = issues.sort_by { |i| last_at[i.id] || Time.now.utc }.reverse
+    # the running issue always comes first, then the rest by recency
+    issues = issues.partition { |i| i.id == active }.flatten.first(RECENT_LIMIT)
+
+    today_hours = TimeEntry.where(user_id: user.id, issue_id: issues.map(&:id), spent_on: user.today)
+                           .group(:issue_id).sum(:hours)
+
+    render json: {
+      active_issue_id: active,
+      issues: issues.map { |i|
+        {
+          id:          i.id,
+          subject:     i.subject,
+          project:     i.project.name,
+          tracker:     i.tracker.name,
+          url:         issue_path(i),
+          last_at:     last_at[i.id]&.utc&.iso8601,
+          today_hours: today_hours[i.id].to_f.round(2),
+          active:      i.id == active
+        }
+      }
+    }
   end
 
   # GET /stopwatch/segments
@@ -261,21 +308,32 @@ class StopwatchController < ApplicationController
     render_404 unless @segment
   end
 
-  def resolve_context
-    @context_issue_id   = nil
-    @context_project_id = nil
+  RECENT_LIMIT      = 5
+  RECENT_SCAN_LIMIT = 40   # look at more issues than we show: some may be closed/hidden
 
-    if params[:issue_id].present?
-      issue = Issue.find_by(id: params[:issue_id])
-      if issue
-        @context_issue_id   = issue.id
-        @context_project_id = issue.project_id
-      end
-    elsif params[:project_id].present?
-      project = Project.find_by(identifier: params[:project_id]) ||
-                Project.find_by(id: params[:project_id])
-      @context_project_id = project&.id
+  # The timer can only run on an issue the user can see and log time on.
+  def find_target_issue
+    @issue = Issue.visible.find_by(id: params[:issue_id])
+    return if @issue && User.current.allowed_to?(:log_time, @issue.project)
+
+    render json: { error: l(:error_stopwatch_issue_required) }, status: :unprocessable_entity
+  end
+
+  def activate_issue
+    if @timer.state == 'stopped'
+      @timer.start!(issue_id: @issue.id, project_id: @issue.project_id)
+    elsif @timer.issue_id == @issue.id
+      @timer.resume! if @timer.state == 'paused'   # already tracking this issue
+    else
+      @timer.snap!(new_issue_id: @issue.id, new_project_id: @issue.project_id)
     end
+    render json: timer_json
+  end
+
+  def parse_ts(value)
+    return value if value.respond_to?(:utc)
+
+    Time.zone.parse(value.to_s)
   end
 
   # Parses "H:MM" string → seconds (multiple of 60), or nil if invalid/zero
@@ -325,13 +383,16 @@ class StopwatchController < ApplicationController
   end
 
   def timer_json
+    issue = @timer.issue_id && Issue.visible.find_by(id: @timer.issue_id)
     {
       state:                  @timer.state,
       elapsed_seconds:        @timer.elapsed_seconds,
       elapsed_display:        @timer.elapsed_display,
       started_at:             @timer.started_at&.utc&.iso8601,
       accumulated_seconds:    @timer.accumulated_seconds,
-      pending_segments_count: StopwatchSegment.where(user_id: User.current.id).count
+      pending_segments_count: StopwatchSegment.where(user_id: User.current.id).count,
+      issue:                  issue && { id: issue.id, subject: issue.subject, url: issue_path(issue) },
+      result:                 @timer.last_result
     }
   end
 end

@@ -1,0 +1,44 @@
+ru:
+  permission_use_stopwatch: "Использовать секундомер"
+  permission_view_stopwatch_others: "Видеть секундомеры других пользователей"
+
+  label_minute_plural: "мин."
+
+  label_stopwatch_segments: "Секундомер"
+  label_stopwatch_segments_list: "Сегменты"
+  label_stopwatch_no_segments: "Нет несохранённых сегментов."
+  label_stopwatch_no_project: "(без проекта)"
+  label_stopwatch_default_project: "Проект по умолчанию"
+  label_stopwatch_spent_time_days: "Сколько дней трудозатрат показывать"
+  label_stopwatch_max_hours_increase: "Максимальное увеличение времени сегмента (минут)"
+  label_stopwatch_active_timer: "Активный таймер"
+  label_stopwatch_other_timers: "Таймеры других пользователей"
+  label_stopwatch_state_running: "Идёт"
+  label_stopwatch_state_paused: "На паузе"
+
+  button_stop: "Стоп"
+
+  error_stopwatch_activity_required: "Укажите вид деятельности"
+  error_stopwatch_comments_required: "Укажите комментарий"
+  error_stopwatch_hours_increase_exceeded: "Время нельзя увеличить более чем на %{max} мин."
+  error_stopwatch_hours_too_small: "Время должно быть не меньше 0:01"
+  error_stopwatch_invalid_hours: "Неверный формат времени (нужно Ч:ММ)"
+  error_stopwatch_project_required: "Укажите проект"
+  error_stopwatch_issue_required: "Таймер можно запустить только на задаче, которую вы видите и в которой можете списывать время"
+  error_stopwatch_generic: "Не удалось обновить таймер"
+
+  button_stopwatch_start: "Начать отсчёт"
+  button_stopwatch_start_here: "Переключить на эту задачу"
+  button_stopwatch_stop: "Остановить"
+  button_stopwatch_recent: "Предыдущие трудозатраты"
+
+  label_stopwatch_recent_title: "Последние задачи"
+  label_stopwatch_recent_empty: "Пока нет задач с записанным временем. Откройте задачу и нажмите старт."
+  label_stopwatch_recent_active: "идёт отсчёт"
+  label_stopwatch_recent_today: "сегодня {h} ч"
+  label_stopwatch_recent_loading: "Загрузка…"
+  label_stopwatch_unsaved_segments: "Несохранённые сегменты ({n})"
+
+  notice_stopwatch_logged: "Записано {hours} ч по задаче #{id}"
+  notice_stopwatch_discarded: "Меньше минуты по задаче #{id} — не записано"
+  notice_stopwatch_kept: "Не удалось записать время по задаче #{id}; сегмент остался в списке сегментов"

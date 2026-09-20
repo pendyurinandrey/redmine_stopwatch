@@ -1,6 +1,15 @@
 # frozen_string_literal: true
 
 class StopwatchHookListener < Redmine::Hook::ViewListener
+  # Keys of the strings the JavaScript widget needs (translated server-side)
+  I18N_KEYS = %i[
+    button_stopwatch_start button_stopwatch_start_here button_stopwatch_stop
+    button_stopwatch_recent label_stopwatch_recent_title label_stopwatch_recent_empty
+    label_stopwatch_recent_active label_stopwatch_recent_today label_stopwatch_recent_loading
+    label_stopwatch_unsaved_segments notice_stopwatch_logged notice_stopwatch_discarded
+    notice_stopwatch_kept error_stopwatch_generic
+  ].freeze
+
   # Inject plugin CSS and JS into <head>
   def view_layouts_base_html_head(context)
     return '' unless User.current.allowed_to?(:use_stopwatch, nil, global: true)
@@ -9,7 +18,7 @@ class StopwatchHookListener < Redmine::Hook::ViewListener
       context[:hook_caller].javascript_include_tag('stopwatch', plugin: 'redmine_stopwatch')
   end
 
-  # Inject timer widget div before #wrapper (JS will move it into #top-menu)
+  # Inject the timer widget (the JS moves it to <body> and renders the bar)
   def view_layouts_base_body_top(context)
     return '' unless User.current.allowed_to?(:use_stopwatch, nil, global: true)
 
@@ -17,83 +26,55 @@ class StopwatchHookListener < Redmine::Hook::ViewListener
     timer.state               ||= 'stopped'
     timer.accumulated_seconds ||= 0
 
-    request       = context[:request]
-    page_context  = detect_page_context(request.path)
-    timer_context = detect_timer_context(timer)
+    view          = context[:hook_caller]
+    page_context  = detect_page_context(view, context[:request].path)
+    timer_context = detect_timer_context(view, timer)
     pending_count = StopwatchSegment.where(user_id: User.current.id).count
+    i18n          = I18N_KEYS.each_with_object({}) { |key, h| h[key] = I18n.t(key) }
 
-    context[:hook_caller].render(
+    view.render(
       partial: 'stopwatch/widget',
       locals:  {
         timer:         timer,
         page_context:  page_context,
         timer_context: timer_context,
-        pending_count: pending_count
+        pending_count: pending_count,
+        i18n:          i18n
       }
     )
   end
 
   private
 
-  # Reserved Redmine path segments that are not project identifiers.
-  # Single source of truth — serialised into data-reserved-paths on the widget and read by JS.
-  RESERVED_PROJECT_PATH_SEGMENTS = %w[
-    new edit copy autocomplete import archive unarchive close reopen
-    settings modules members versions issues boards documents wiki
-    activity repository search calendar gantt files news queries time_entries
-  ].freeze
-  RESERVED_PROJECT_PATHS = Regexp.new("\\A(#{RESERVED_PROJECT_PATH_SEGMENTS.join('|')})\\z")
+  # The issue shown on the current page (if any). Only issues the user can
+  # both see and log time on can start the timer.
+  def detect_page_context(view, path)
+    result = { id: nil, subject: nil, url: nil, can_track: false }
+    return result unless (m = path.match(%r{/issues/(\d+)(?:[/.]|\z)}))
 
-  def detect_page_context(path)
-    result = { label: nil, url: nil, issue_id: nil, project_id: nil }
-
-    if (m = path.match(%r{/issues/(\d+)}))
-      issue = Issue.find_by(id: m[1])
-      if issue
-        result[:label]      = "##{issue.id}"
-        result[:url]        = "/issues/#{issue.id}"
-        result[:issue_id]   = issue.id.to_s
-        result[:project_id] = issue.project_id.to_s
-      end
-    elsif (m = path.match(%r{/projects/([^/]+)}))
-      identifier = m[1]
-      unless RESERVED_PROJECT_PATHS.match?(identifier)
-        project = Project.find_by(identifier: identifier)
-        if project
-          result[:label]      = truncate_name(project.name)
-          result[:url]        = "/projects/#{project.identifier}"
-          result[:project_id] = project.id.to_s
-        end
-      end
+    issue = Issue.visible.find_by(id: m[1])
+    if issue
+      result[:id]        = issue.id.to_s
+      result[:subject]   = issue.subject
+      result[:url]       = view.issue_path(issue)
+      result[:can_track] = User.current.allowed_to?(:log_time, issue.project)
     end
-
     result
   end
 
-  def detect_timer_context(timer)
-    result = { label: nil, url: nil, issue_id: nil, project_id: nil }
+  # The issue the timer is currently running on (if any)
+  def detect_timer_context(view, timer)
+    result = { id: nil, subject: nil, url: nil }
+    return result unless timer.issue_id.present?
 
-    if timer.issue_id.present?
-      issue = Issue.find_by(id: timer.issue_id)
-      if issue
-        result[:label]      = "##{issue.id}"
-        result[:url]        = "/issues/#{issue.id}"
-        result[:issue_id]   = issue.id.to_s
-        result[:project_id] = issue.project_id.to_s
-      end
-    elsif timer.project_id.present?
-      project = Project.find_by(id: timer.project_id)
-      if project
-        result[:label]      = truncate_name(project.name)
-        result[:url]        = "/projects/#{project.identifier}"
-        result[:project_id] = project.id.to_s
-      end
+    issue = Issue.visible.find_by(id: timer.issue_id)
+    if issue
+      result[:id]      = issue.id.to_s
+      result[:subject] = issue.subject
+      result[:url]     = view.issue_path(issue)
+    else
+      result[:id] = timer.issue_id.to_s
     end
-
     result
-  end
-
-  def truncate_name(name, max_len = 20)
-    name.length > max_len ? "#{name[0...max_len]}..." : name
   end
 end

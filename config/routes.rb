@@ -7,6 +7,9 @@ RedmineApp::Application.routes.draw do
   post 'stopwatch/snap',   to: 'stopwatch#snap',   as: 'stopwatch_snap',   defaults: { format: :json }
   post 'stopwatch/stop',   to: 'stopwatch#stop',   as: 'stopwatch_stop',   defaults: { format: :json }
 
+  # Most recently tracked issues (dialog)
+  get  'stopwatch/recent', to: 'stopwatch#recent', as: 'stopwatch_recent', defaults: { format: :json }
+
   # Segments page (HTML)
   get    'stopwatch/segments',              to: 'stopwatch#segments',       as: 'stopwatch_segments'
   post   'stopwatch/segments/:id/update',   to: 'stopwatch#update_segment', as: 'stopwatch_update_segment'

@@ -24,3 +24,22 @@ en:
   error_stopwatch_hours_too_small: "Time must be at least 0:01"
   error_stopwatch_invalid_hours: "Invalid time format (expected H:MM)"
   error_stopwatch_project_required: "Project is required"
+
+  error_stopwatch_issue_required: "The timer can only run on an issue you can see and log time on"
+  error_stopwatch_generic: "Could not update the timer"
+
+  button_stopwatch_start: "Start tracking"
+  button_stopwatch_start_here: "Switch to this issue"
+  button_stopwatch_stop: "Stop tracking"
+  button_stopwatch_recent: "Recent time entries"
+
+  label_stopwatch_recent_title: "Recent issues"
+  label_stopwatch_recent_empty: "No recently tracked issues yet. Open an issue and press start."
+  label_stopwatch_recent_active: "tracking now"
+  label_stopwatch_recent_today: "today {h} h"
+  label_stopwatch_recent_loading: "Loading…"
+  label_stopwatch_unsaved_segments: "Unsaved segments ({n})"
+
+  notice_stopwatch_logged: "Logged {hours} h on #{id}"
+  notice_stopwatch_discarded: "Shorter than 1 minute on #{id} — not logged"
+  notice_stopwatch_kept: "Could not log time on #{id}; the segment is kept in the segments list"

@@ -8,7 +8,7 @@ Redmine::Plugin.register :redmine_stopwatch do
   url         'https://github.com/ipslv/redmine_stopwatch.git'
   author      'SIA IPS (Claude Code)'
   author_url  'https://www.ips.lv'
-  version     '1.5.2'
+  version     '1.6.0-local'
 
   requires_redmine version_or_higher: '6.1.0'
 
@@ -18,7 +18,7 @@ Redmine::Plugin.register :redmine_stopwatch do
   permission :use_stopwatch, {
     stopwatch: [:state, :start, :pause, :resume, :snap, :stop,
                 :segments, :save_segment, :delete_segment, :update_segment,
-                :update_timer_comment, :issue_project]
+                :update_timer_comment, :issue_project, :recent]
   }, require: :loggedin
 
   permission :view_stopwatch_others, {}, require: :loggedin
