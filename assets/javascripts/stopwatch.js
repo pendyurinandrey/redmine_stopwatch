@@ -190,6 +190,20 @@
     resetTick();
   }
 
+  // Re-read the timer from the server so a tab that was in the background
+  // (or restored from the browser cache) never shows a stale state.
+  var lastSyncMs = 0;
+  function syncFromServer() {
+    if (busy || !widget || !widget.dataset.stateUrl) { return; }
+    var now = Date.now();
+    if (now - lastSyncMs < 2000) { return; }
+    lastSyncMs = now;
+    $.ajax({
+      url: widget.dataset.stateUrl, type: 'GET', dataType: 'json', cache: false,
+      success: function (data) { if (!busy) { applyState(data, true); } }
+    });
+  }
+
   function resetTick() {
     if (tickTimeout)  { clearTimeout(tickTimeout);   tickTimeout  = null; }
     if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
@@ -382,6 +396,14 @@
 
     renderBar();
     resetTick();
+
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) { syncFromServer(); }
+    });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) { syncFromServer(); } });
+    window.addEventListener('focus', syncFromServer);
+    setInterval(function () { if (!document.hidden) { syncFromServer(); } }, 60000);
+    syncFromServer();
   });
 
 }(jQuery));
