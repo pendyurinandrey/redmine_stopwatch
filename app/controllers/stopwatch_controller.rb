@@ -1,6 +1,13 @@
 # frozen_string_literal: true
 
 class StopwatchController < ApplicationController
+  # Redmine REST API key authentication (header `X-Redmine-API-Key`, needs Administration > Settings > API >
+  # "Enable REST web service") for the JSON timer endpoints used by the mobile app and scripts. Call them with an
+  # explicit `.json` suffix: Redmine treats such requests as API requests, i.e. it ignores the browser session and needs
+  # no CSRF token. The browser widget calls the same actions without the suffix and keeps using session + CSRF.
+  # Everything else (pause, resume, snap, the segments page ...) stays session-only.
+  accept_api_auth :state, :start, :stop, :recent
+
   before_action :require_login
   before_action :authorize_global
   before_action :find_timer,   only: %i[state start pause resume snap stop]

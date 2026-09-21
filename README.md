@@ -164,13 +164,13 @@ The plugin has no extra gem dependencies.
 
    ```bash
    cd /path/to/redmine/plugins
-   git clone --branch v2.0.1 https://github.com/pendyurinandrey/redmine_stopwatch.git redmine_stopwatch
+   git clone --branch v2.1.0 https://github.com/pendyurinandrey/redmine_stopwatch.git redmine_stopwatch
    ```
 
    In a Docker image, do the same in the `Dockerfile` (and run the migrations on start):
 
    ```dockerfile
-   RUN git clone --depth 1 --branch v2.0.1 \
+   RUN git clone --depth 1 --branch v2.1.0 \
            https://github.com/pendyurinandrey/redmine_stopwatch.git plugins/redmine_stopwatch \
        && rm -rf plugins/redmine_stopwatch/.git
    ```
@@ -216,7 +216,9 @@ the JavaScript bar are translated on the server, so no JS changes are needed.
 
 ## HTTP API
 
-All endpoints require a logged-in user with the **Use stopwatch** permission. JSON responses have the same shape:
+All endpoints require an authenticated user with the **Use stopwatch** permission. The browser widget authenticates with the
+session cookie; scripts and the mobile app can use a **Redmine REST API key** for the four JSON timer endpoints (see below).
+JSON responses have the same shape:
 
 ```json
 {
@@ -233,6 +235,29 @@ All endpoints require a logged-in user with the **Use stopwatch** permission. JS
 
 `result` describes what a stop/switch did: `{"status":"logged","issue_id":1,"hours":0.42,"entry_id":7}`,
 `{"status":"discarded","issue_id":1,"seconds":12}` or `{"status":"kept","issue_id":1,"reason":"no_activity"}`.
+
+### Authentication with an API key
+
+Enable **Administration → Settings → API → Enable REST web service** (the key is then shown in **My account → API access key**).
+Send it in the `X-Redmine-API-Key` header and call the endpoints **with the `.json` suffix**:
+
+```bash
+curl -H 'X-Redmine-API-Key: <key>' https://redmine.example.com/stopwatch/state.json
+curl -H 'X-Redmine-API-Key: <key>' -d issue_id=42 https://redmine.example.com/stopwatch/start.json
+curl -X POST -H 'X-Redmine-API-Key: <key>' https://redmine.example.com/stopwatch/stop.json
+curl -H 'X-Redmine-API-Key: <key>' https://redmine.example.com/stopwatch/recent.json
+```
+
+* Open to API keys: `state`, `start`, `stop`, `recent`. Everything else (`pause`, `resume`, `snap`, the Stopwatch page ...) is
+  session-only and answers `403` to an API key.
+* A `.json` URL is a Redmine *API request*: the browser session is ignored and no CSRF token is needed; the widget calls the same
+  actions without the suffix and keeps using session and CSRF (`POST /stopwatch/start` with a key but without `.json` is rejected).
+* The timer is the user's single server-side timer: one started through the API is the same timer the browser widget shows,
+  and a stop through the API writes the same time entry (comment = issue subject).
+* Answers: `401` — no or invalid key; `403` — the user lacks **Use stopwatch** (or the action is not open to API keys);
+  `422` — `issue_id` is missing, or the issue is not visible / time cannot be logged on it.
+* Redmine's other API authentication methods (HTTP Basic, OAuth) work for these endpoints as for any Redmine API resource.
+* **The key gives the same access as the account**: keep it secret, use HTTPS only, reset it in *My account* if it leaks.
 
 ### Timer (JSON)
 
