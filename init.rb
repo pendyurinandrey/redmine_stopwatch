@@ -8,7 +8,7 @@ Redmine::Plugin.register :redmine_stopwatch do
   url         'https://github.com/ipslv/redmine_stopwatch.git'
   author      'SIA IPS (Claude Code)'
   author_url  'https://www.ips.lv'
-  version     '1.6.0-local'
+  version     '2.0.1'
 
   requires_redmine version_or_higher: '6.1.0'
 
